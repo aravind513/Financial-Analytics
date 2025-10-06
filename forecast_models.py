@@ -4,10 +4,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from keras.models import Sequential
-from keras.layers import LSTM, Dense
+from keras.layers import LSTM, GRU, Dense
 from keras.optimizers import Adam
 import warnings
 warnings.filterwarnings('ignore')
@@ -44,6 +46,14 @@ y_rf = df_rf['close'].values
 rf = RandomForestRegressor(n_estimators=100, random_state=42)
 rf.fit(X_rf, y_rf)
 
+# XGBoost model (same lag features)
+xgb = XGBRegressor(n_estimators=100, random_state=42)
+xgb.fit(X_rf, y_rf)
+
+# LightGBM model
+lgb = LGBMRegressor(n_estimators=100, random_state=42)
+lgb.fit(X_rf, y_rf)
+
 # Prepare iterative RF forecast
 rf_input = df_rf[[f'lag_{lag}' for lag in range(1, lags+1)]].values[-1].tolist()
 rf_pred_future = []
@@ -52,6 +62,24 @@ for _ in range(future_days):
     rf_pred_future.append(pred)
     rf_input.pop(0)
     rf_input.append(pred)
+
+# XGBoost iterative forecast
+xgb_input = df_rf[[f'lag_{lag}' for lag in range(1, lags+1)]].values[-1].tolist()
+xgb_pred_future = []
+for _ in range(future_days):
+    pred = xgb.predict([xgb_input])[0]
+    xgb_pred_future.append(pred)
+    xgb_input.pop(0)
+    xgb_input.append(pred)
+
+# LightGBM iterative forecast
+lgb_input = df_rf[[f'lag_{lag}' for lag in range(1, lags+1)]].values[-1].tolist()
+lgb_pred_future = []
+for _ in range(future_days):
+    pred = lgb.predict([lgb_input])[0]
+    lgb_pred_future.append(pred)
+    lgb_input.pop(0)
+    lgb_input.append(pred)
 
 
 # 2. Logistic Regression (predicting up/down movement)
@@ -78,6 +106,16 @@ lstm_model.compile(optimizer=Adam(learning_rate=0.01), loss='mse')
 lstm_model.fit(X_lstm, y_lstm, epochs=20, batch_size=16, verbose=0)
 lstm_pred_scaled = lstm_model.predict(X_lstm)
 lstm_pred = scaler.inverse_transform(lstm_pred_scaled)
+
+# GRU model (same architecture idea as LSTM)
+gru_model = Sequential([
+    GRU(50, input_shape=(look_back, 1)),
+    Dense(1)
+])
+gru_model.compile(optimizer=Adam(learning_rate=0.01), loss='mse')
+gru_model.fit(X_lstm, y_lstm, epochs=20, batch_size=16, verbose=0)
+gru_pred_scaled = gru_model.predict(X_lstm)
+gru_pred = scaler.inverse_transform(gru_pred_scaled)
 
 # 4. SARIMA Forecast
 sarima_order = (1, 1, 1)
@@ -121,6 +159,9 @@ results['linear_regression'] = lin_pred.flatten()
 lstm_full = np.full(len(close_prices), np.nan)
 lstm_full[look_back:] = lstm_pred.flatten()
 results['lstm'] = lstm_full
+gru_full = np.full(len(close_prices), np.nan)
+gru_full[look_back:] = gru_pred.flatten()
+results['gru'] = gru_full
 sarima_full = np.full(len(close_prices), np.nan)
 sarima_full[look_back:] = sarima_pred.flatten()
 results['sarima'] = sarima_full
@@ -134,6 +175,10 @@ results['arima'] = arima_full
 rf_hist = np.full(len(close_prices), np.nan)
 rf_hist[len(close_prices) - len(X_rf):] = rf.predict(X_rf)
 results['random_forest'] = rf_hist
+results['xgboost'] = np.full(len(close_prices), np.nan)
+results['xgboost'][len(close_prices) - len(X_rf):] = xgb.predict(X_rf)
+results['lightgbm'] = np.full(len(close_prices), np.nan)
+results['lightgbm'][len(close_prices) - len(X_rf):] = lgb.predict(X_rf)
 
 # Save to Excel
 
@@ -148,7 +193,12 @@ X_future = np.arange(len(close_prices), len(close_prices) + future_days).reshape
 lin_pred_future = lin_reg.predict(X_future).flatten()
 
 # SARIMA future forecast
-sarima_pred_future = sarima_result.predict(start=len(close_prices), end=len(close_prices) + future_days - 1)
+# SARIMAX future forecast with confidence intervals
+sarimax_fore = sarima_result.get_forecast(steps=future_days)
+sarimax_df = sarimax_fore.summary_frame(alpha=0.05)
+sarima_pred_future = sarimax_df['mean'].values
+sarima_pred_lower = sarimax_df['mean_ci_lower'].values
+sarima_pred_upper = sarimax_df['mean_ci_upper'].values
 
 # ARMA future forecast
 arma_pred_future = arma_result.predict(start=len(close_prices), end=len(close_prices) + future_days - 1)
@@ -179,6 +229,21 @@ future_results['arima'] = arima_pred_future
 future_results['arch_volatility'] = arch_vol_forecast
 future_results['garch_volatility'] = garch_vol_forecast
 future_results['random_forest'] = rf_pred_future
+future_results['xgboost'] = xgb_pred_future
+future_results['lightgbm'] = lgb_pred_future
+# Add SARIMAX confidence intervals
+future_results['sarimax_lower'] = sarima_pred_lower
+future_results['sarimax_upper'] = sarima_pred_upper
+# GRU future forecast
+gru_input = prices_scaled[-look_back:].reshape(1, look_back, 1)
+gru_pred_future = []
+for _ in range(future_days):
+    next_pred_scaled = gru_model.predict(gru_input, verbose=0)
+    next_pred = scaler.inverse_transform(next_pred_scaled)[0, 0]
+    gru_pred_future.append(next_pred)
+    gru_input = np.roll(gru_input, -1, axis=1)
+    gru_input[0, -1, 0] = next_pred_scaled[0, 0]
+future_results['gru'] = gru_pred_future
 
 # Calculate price ranges after DataFrame creation
 last_price = close_prices.flatten()[-1]
@@ -189,5 +254,11 @@ future_results['garch_lower'] = last_price * (1 - future_results['garch_volatili
 
 # Combine and save
 final_results = pd.concat([results, future_results], ignore_index=True)
-final_results.to_excel('forecast_results.xlsx', index=False)
-print('Forecast results saved to forecast_results.xlsx')
+try:
+    final_results.to_excel('forecast_results.xlsx', index=False)
+    print('Forecast results saved to forecast_results.xlsx')
+except PermissionError:
+    # If the file is open in Excel (locked), save to a timestamped file instead
+    fallback_name = f"forecast_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    final_results.to_excel(fallback_name, index=False)
+    print(f"Could not write to 'forecast_results.xlsx' (file may be open). Saved to {fallback_name} instead.")
