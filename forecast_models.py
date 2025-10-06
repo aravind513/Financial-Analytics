@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from keras.models import Sequential
@@ -28,6 +29,30 @@ X = np.arange(len(close_prices)).reshape(-1, 1)
 lin_reg = LinearRegression()
 lin_reg.fit(X, close_prices)
 lin_pred = lin_reg.predict(X)
+
+# Number of future days to forecast (used by RF iterative loop)
+future_days = 30
+
+# 5. Random Forest Forecast (lag features)
+lags = 10
+df_rf = pd.DataFrame({'close': close_prices.flatten()})
+for lag in range(1, lags+1):
+    df_rf[f'lag_{lag}'] = df_rf['close'].shift(lag)
+df_rf = df_rf.dropna().reset_index(drop=True)
+X_rf = df_rf[[f'lag_{lag}' for lag in range(1, lags+1)]].values
+y_rf = df_rf['close'].values
+rf = RandomForestRegressor(n_estimators=100, random_state=42)
+rf.fit(X_rf, y_rf)
+
+# Prepare iterative RF forecast
+rf_input = df_rf[[f'lag_{lag}' for lag in range(1, lags+1)]].values[-1].tolist()
+rf_pred_future = []
+for _ in range(future_days):
+    pred = rf.predict([rf_input])[0]
+    rf_pred_future.append(pred)
+    rf_input.pop(0)
+    rf_input.append(pred)
+
 
 # 2. Logistic Regression (predicting up/down movement)
 
@@ -105,6 +130,10 @@ results['arma'] = arma_full
 arima_full = np.full(len(close_prices), np.nan)
 arima_full[look_back:] = arima_pred.flatten()
 results['arima'] = arima_full
+# Add historical RF predictions where possible (align with lags)
+rf_hist = np.full(len(close_prices), np.nan)
+rf_hist[len(close_prices) - len(X_rf):] = rf.predict(X_rf)
+results['random_forest'] = rf_hist
 
 # Save to Excel
 
@@ -149,6 +178,7 @@ future_results['arma'] = arma_pred_future
 future_results['arima'] = arima_pred_future
 future_results['arch_volatility'] = arch_vol_forecast
 future_results['garch_volatility'] = garch_vol_forecast
+future_results['random_forest'] = rf_pred_future
 
 # Calculate price ranges after DataFrame creation
 last_price = close_prices.flatten()[-1]
